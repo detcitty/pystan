@@ -1054,9 +1054,6 @@ namespace pystan {
           // FIXME PyStan: to implement args.write_args_as_comment(diagnostic_stream);
         }
 
-        std::cout << "args.get_ctrl_variational_algorithm()" << args.get_ctrl_variational_algorithm() << std::endl;
-        std::cout << "args.get_ctrl_variational_grad_samples()" << args.get_ctrl_variational_grad_samples() << std::endl;
-
         clock_t start_check = clock();
 
         double init_log_prob;
