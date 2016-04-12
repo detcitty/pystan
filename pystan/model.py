@@ -752,7 +752,7 @@ class StanModel:
         return fit
 
     def vb(self, data=None, pars=None, iter=10000,
-           seed=None, sample_file=None, verbose=False,
+           seed=None, init='random', sample_file=None, verbose=False,
            algorithm=None, **kwargs):
         """Call Stan's variational Bayes methods.
 
@@ -839,9 +839,18 @@ class StanModel:
         m_pars = fit._get_param_names()
         p_dims = fit._get_param_dims()
 
+        if isinstance(init, Number):
+            init = str(init)
+        elif isinstance(init, Callable):
+            init = init()
+        elif not isinstance(init, Iterable) and \
+                not isinstance(init, string_types):
+            raise ValueError("Wrong specification of initial values.")
+
         seed = pystan.misc._check_seed(seed)
 
         stan_args = dict(iter=iter,
+                         init=init,
                          chain_id=1,
                          seed=seed,
                          method="variational",
@@ -858,14 +867,27 @@ class StanModel:
                 raise ValueError("Parameter `{}` is not recognized.".format(arg))
 
         stan_args.update(kwargs)
+
+        print stan_args
+
         stan_args = pystan.misc._get_valid_stan_args(stan_args)
 
         ret, sample = fit._call_sampler(stan_args)
         samples = [sample]
 
+        print ret
+        print sample['par']
+
         # _organize_inits strips out lp__ (RStan does it in this method)
         # TODO GRAB THE INITIAL SAPMLES HERE
-        inits_used = pystan.misc._organize_inits([s.['inits'] for s in samples], m_pars, p_dims)
+        # inits_used = pystan.misc._organize_inits([s.['inits'] for s in samples], m_pars, p_dims)
+        # print inits_used
+
+        pars = pystan.misc._par_vector2dict(sample['par'], m_pars, p_dims)
+        if not as_vector:
+            return OrderedDict([('par', pars), ('value', sample['value'])])
+        else:
+            return pars
 
         random_state = np.random.RandomState(stan_args['seed'])
         chains = 1
