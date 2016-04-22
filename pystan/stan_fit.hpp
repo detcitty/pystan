@@ -81,6 +81,7 @@
 #include <stan/interface_callbacks/writer/stream_writer.hpp>
 
 #include <stan/variational/advi.hpp>
+#include <stan/io/stan_csv_reader.hpp>
 
 #include "py_var_context.hpp"
 #include "py_var_context_factory.hpp"
@@ -1134,7 +1135,88 @@ namespace pystan {
               cmd_advi.run(eta, adapt_engaged, adapt_iterations, tol_rel_obj, 
                            max_iterations);
         }
+
+        // STUFF IS GONNA HAPPEN HERE
         holder.args = args;
+
+        // sample_stream.close()
+
+        std::ifstream in;
+        if (args.get_sample_file_flag()) {
+          in.open(args.get_sample_file().c_str());
+        }
+        
+        std::cout << " good()=" << in.good();
+        std::cout << " eof()=" << in.eof();
+        std::cout << " fail()=" << in.fail();
+        std::cout << " bad()=" << in.bad();
+        std::cout << std::endl;
+
+        std::stringstream ss;
+        std::string line;
+
+        int rows = 0;
+        int cols = -1;
+
+        while (in.good()) {
+          bool comment_line = (in.peek() == '#');
+          bool empty_line   = (in.peek() == '\n');
+
+          std::getline(in, line);
+
+          if (empty_line)
+            continue;
+          if (!line.length())
+            break;
+
+          if (!comment_line) {
+            ss << line << '\n';
+            std::cout << line << std::endl;
+            int current_cols = std::count(line.begin(), line.end(), ',') + 1;
+            if (cols == -1) {
+              cols = current_cols;
+            } else if (cols != current_cols) {
+              std::cout << "Error: expected " << cols << " columns, but found "
+                   << current_cols << " instead for row " << rows + 1
+                   << std::endl;
+            }
+            rows++;
+          }
+        }
+
+        std::cout << "rows = " << rows << std::endl;
+        std::cout << "cols = " << cols << std::endl;
+
+        ss.seekg(std::ios_base::beg);
+        std::getline(ss, line); // toss the first line that contains names
+
+        // get the mean parameters (stored in first line)
+        std::vector<double> mean_pars;
+        std::getline(ss, line);
+        std::stringstream ls(line);
+        for (int col = 0; col < cols; col++) {
+            std::getline(ls, line, ',');
+            boost::trim(line);
+            mean_pars.push_back(boost::lexical_cast<double>(line));
+        }
+        holder.mean_pars = mean_pars;
+
+        // get the samples
+
+        std::vector<std::vector<double> > samples;
+        for (int row = 0; row < rows - 2; row++) {
+          std::getline(ss, line);
+          std::stringstream ls(line);
+          std::vector<double> row_of_samples;
+          for (int col = 0; col < cols; col++) {
+            std::getline(ls, line, ',');
+            boost::trim(line);
+            row_of_samples.push_back(boost::lexical_cast<double>(line));
+          }
+          samples.push_back(row_of_samples);
+        }
+        holder.chains = samples;
+        
         return 0;
       }
 

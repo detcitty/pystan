@@ -857,6 +857,8 @@ class StanModel:
                          algorithm=algorithm)
         if sample_file is not None:
             stan_args['sample_file'] = pystan.misc._writable_sample_file(sample_file)
+        else:
+            stan_args['sample_file'] = pystan.misc._temp_sample_file()
 
         # check that arguments in kwargs are valid
         valid_args = {'elbo_samples', 'eta', 'adapt_engaged', 'eval_elbo',
@@ -867,37 +869,24 @@ class StanModel:
                 raise ValueError("Parameter `{}` is not recognized.".format(arg))
 
         stan_args.update(kwargs)
-
-        print stan_args
-
         stan_args = pystan.misc._get_valid_stan_args(stan_args)
 
         ret, sample = fit._call_sampler(stan_args)
-        samples = [sample]
-
-        print ret
-        print sample['par']
 
         # _organize_inits strips out lp__ (RStan does it in this method)
         # TODO GRAB THE INITIAL SAPMLES HERE
         # inits_used = pystan.misc._organize_inits([s.['inits'] for s in samples], m_pars, p_dims)
         # print inits_used
 
-        pars = pystan.misc._par_vector2dict(sample['par'], m_pars, p_dims)
-        if not as_vector:
-            return OrderedDict([('par', pars), ('value', sample['value'])])
-        else:
-            return pars
-
         random_state = np.random.RandomState(stan_args['seed'])
         chains = 1
-        output_samples = int(stan_args['ctrl']['output_samples'])
+        output_samples = int(stan_args['ctrl']['variational']['output_samples'])
         perm_lst = [random_state.permutation(output_samples) for _ in range(chains)]
         fnames_oi = fit._get_param_fnames_oi()
         n_flatnames = len(fnames_oi)
-        fit.sim = {'samples': samples,
+        fit.sim = {'samples': sample.chains,
                    # rstan has this; name clashes with 'chains' in samples[0]['chains']
-                   'chains': len(samples),
+                   'chains': len(sample.chains),
                    'iter': iter,
                    'warmup': 0,
                    'thin': 1,
@@ -912,7 +901,7 @@ class StanModel:
         fit.model_pars = m_pars
         fit.par_dims = p_dims
         fit.mode = 0 if not kwargs.get('test_grad') else 1
-        fit.inits = inits_used
+        fit.inits = None #inits_used
         fit.stan_args = [stan_args]
         fit.stanmodel = self
         fit.date = datetime.datetime.now()
