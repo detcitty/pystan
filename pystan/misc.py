@@ -945,6 +945,9 @@ def _writable_sample_file(file, warn=True, wfun=None):
             logger.warning(wfun(dir, dir2))
         return os.path.join(dir2, os.path.basename(file))
 
+def _temp_sample_file():
+    dir = tempfile.mkdtemp()
+    return os.path.join(dir, 'output.csv')    
 
 def is_legal_stan_vname(name):
     stan_kw1 = ('for', 'in', 'while', 'repeat', 'until', 'if', 'then', 'else',
