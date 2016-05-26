@@ -61,7 +61,6 @@
 #include <stan/services/io/do_print.hpp>
 #include <stan/services/io/write_error_msg.hpp>
 #include <stan/services/io/write_iteration.hpp>
-#include <stan/services/io/write_iteration_csv.hpp>
 #include <stan/services/io/write_model.hpp>
 #include <stan/services/io/write_stan.hpp>
 #include <stan/services/init/initialize_state.hpp>
@@ -679,38 +678,25 @@ namespace pystan {
     }
 
     template<class Sampler>
-    void init_adapt(stan::mcmc::base_mcmc* sampler_ptr, const StanArgs& args,
-                    const Eigen::VectorXd& cont_params) {
-
-      if (!args.get_ctrl_sampling_adapt_engaged()) return;
-
+    bool init_windowed_adapt(stan::mcmc::base_mcmc* sampler_ptr, const StanArgs& args,
+                             const Eigen::VectorXd& cont_params,
+                             stan::interface_callbacks::writer::base_writer& info,
+                             stan::interface_callbacks::writer::base_writer& error) {
       double delta = args.get_ctrl_sampling_adapt_delta();
       double gamma = args.get_ctrl_sampling_adapt_gamma();
       double kappa = args.get_ctrl_sampling_adapt_kappa();
       double t0 = args.get_ctrl_sampling_adapt_t0();
-      double epsilon = args.get_ctrl_sampling_stepsize();
-
       Sampler* sampler_ptr2 = dynamic_cast<Sampler*>(sampler_ptr);
-      sampler_ptr2->get_stepsize_adaptation().set_mu(log(10 * epsilon));
-      sampler_ptr2->get_stepsize_adaptation().set_delta(delta);
-      sampler_ptr2->get_stepsize_adaptation().set_gamma(gamma);
-      sampler_ptr2->get_stepsize_adaptation().set_kappa(kappa);
-      sampler_ptr2->get_stepsize_adaptation().set_t0(t0);
-      sampler_ptr2->engage_adaptation();
-      sampler_ptr2->z().q = cont_params;
-      sampler_ptr2->init_stepsize();
-    }
 
-    template<class Sampler>
-    bool init_windowed_adapt(stan::mcmc::base_mcmc* sampler_ptr, const StanArgs& args,
-                             const Eigen::VectorXd& cont_params) {
+      stan::services::sample::init_adapt<Sampler>(sampler_ptr2,
+                                                  delta, gamma, kappa, t0, cont_params,
+                                                  info, error);
 
-      init_adapt<Sampler>(sampler_ptr, args, cont_params);
-      Sampler* sampler_ptr2 = dynamic_cast<Sampler*>(sampler_ptr);
       sampler_ptr2->set_window_params(args.get_ctrl_sampling_warmup(),
                                       args.get_ctrl_sampling_adapt_init_buffer(),
                                       args.get_ctrl_sampling_adapt_term_buffer(),
-                                      args.get_ctrl_sampling_adapt_window());
+                                      args.get_ctrl_sampling_adapt_window(),
+                                      info);
       return true;
     }
 
@@ -784,6 +770,7 @@ namespace pystan {
 
       std::stringstream ss;
       stan::interface_callbacks::writer::stream_writer info(ss);
+      stan::interface_callbacks::writer::stream_writer err(std::cerr);
 
       stan::interface_callbacks::writer::stream_writer diagnostic_writer
         = diagnostic_writer_factory(&diagnostic_stream, "# ");
@@ -792,7 +779,7 @@ namespace pystan {
                                           pystan_sample_writer,
                                           stan::interface_callbacks::writer::stream_writer,
                                           stan::interface_callbacks::writer::stream_writer>
-        writer(sample_writer, diagnostic_writer, message_writer, &std::cout);
+        writer(sample_writer, diagnostic_writer, message_writer);
 
 
       if (!args.get_append_samples()) {
@@ -823,7 +810,9 @@ namespace pystan {
          prefix,
          suffix,
          std::cout,
-         interruptCallback);
+         interruptCallback,
+         info,
+         err);
 
       clock_t end = clock();
       double warmDeltaT = (double)(end - start) / CLOCKS_PER_SEC;
@@ -854,7 +843,9 @@ namespace pystan {
          prefix,
          suffix,
          std::cout,
-         interruptCallback);
+         interruptCallback,
+         info,
+         err);
 
       end = clock();
       double sampleDeltaT = (double)(end - start) / CLOCKS_PER_SEC;
@@ -919,7 +910,8 @@ namespace pystan {
                         const std::vector<size_t>& qoi_idx,
                         const std::vector<std::string>& fnames_oi, RNG_t& base_rng) {
       std::stringstream ss;
-      stan::interface_callbacks::writer::stream_writer info(ss);
+      stan::interface_callbacks::writer::stream_writer info(std::cout);
+      stan::interface_callbacks::writer::stream_writer error(std::cerr);
 
       base_rng.seed(args.get_random_seed());
       // (2**50 = 1T samples, 1000 chains)
@@ -974,9 +966,10 @@ namespace pystan {
         double epsilon = args.get_ctrl_test_grad_epsilon();
         double error = args.get_ctrl_test_grad_error();
         ss.str("");
+
         int num_failed =
           stan::model::test_gradients<true,true>(model,cont_vector,disc_vector,
-                                                 epsilon,error,ss,&std::cout);
+                                                 epsilon,error,info);
         std::cout << ss.str() << std::endl;
         holder.num_failed = num_failed;
         holder.test_grad = true;
@@ -1050,15 +1043,18 @@ namespace pystan {
           lbfgs._conv_opts.tolRelGrad = args.get_ctrl_optim_tol_rel_grad();
           lbfgs._conv_opts.tolAbsX    = args.get_ctrl_optim_tol_param();
           lbfgs._conv_opts.maxIts     = args.get_iter();
-
+          
+          stan::interface_callbacks::writer::stream_writer sampler_writer(sample_stream);
+          
           stan::services::optimize::do_bfgs_optimize(model, lbfgs, base_rng,
                                                      lp, cont_vector, disc_vector,
-                                                     &sample_stream, &std::cout,
+                                                     sampler_writer, info,
                                                      save_iterations, refresh, interruptCallback);
 
           if (args.get_sample_file_flag()) {
-            stan::services::io::write_iteration(sample_stream, model, base_rng,
-                                          lp, cont_vector, disc_vector, &std::cout);
+            stan::services::io::write_iteration(model, base_rng,
+                                                lp, cont_vector, disc_vector,
+                                                info, sampler_writer);
             sample_stream.close();
           }
           model.write_array(base_rng,cont_vector,disc_vector, params_inr_etc);
@@ -1115,14 +1111,17 @@ namespace pystan {
           bfgs._conv_opts.tolAbsX    = args.get_ctrl_optim_tol_param();
           bfgs._conv_opts.maxIts     = args.get_iter();
 
+          stan::interface_callbacks::writer::stream_writer sampler_writer(sample_stream);
+
           stan::services::optimize::do_bfgs_optimize(model, bfgs, base_rng,
                                                      lp, cont_vector, disc_vector,
-                                                     &sample_stream, &std::cout,
+                                                     sampler_writer, info,
                                                      save_iterations, refresh, interruptCallback);
 
           if (args.get_sample_file_flag()) {
-            stan::services::io::write_iteration(sample_stream, model, base_rng,
-                                          lp, cont_vector, disc_vector, &std::cout);
+            stan::services::io::write_iteration(model, base_rng,
+                                                lp, cont_vector, disc_vector,
+                                                info, sampler_writer);
             sample_stream.close();
           }
           model.write_array(base_rng,cont_vector,disc_vector,params_inr_etc);
@@ -1219,7 +1218,7 @@ namespace pystan {
       stan::mcmc::sample s(cont_params, 0, 0);
 
       if (algorithm == Fixed_param) {
-        stan::mcmc::fixed_param_sampler sampler(&std::cout, &std::cerr);
+        stan::mcmc::fixed_param_sampler sampler;
         if (args.get_ctrl_sampling_warmup() != 0) {
           std::cout << "Warning: warmup will be skipped for the fixed parameter sampler!" << std::endl;
           args.set_ctrl_sampling_warmup(0);
@@ -1230,19 +1229,19 @@ namespace pystan {
         return 0;
 
       }
+      
       switch (algorithm) {
          case Metropolis: engine_index = 3; break;
          case HMC: engine_index = 0; break;
          case NUTS: engine_index = 1; break;
          default: engine_index = 10000; // make it fail in the end
       }
-
       int sampler_select = engine_index + 10 * metric_index;
-      if (args.get_ctrl_sampling_adapt_engaged())  sampler_select += 100;
+      if (args.get_ctrl_sampling_adapt_engaged())  sampler_select += 100;      
       switch (sampler_select) {
         case 0: {
           typedef stan::mcmc::unit_e_static_hmc<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_static_hmc<sampler_t>(&sampler, args);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
@@ -1251,7 +1250,7 @@ namespace pystan {
         }
         case 1: {
           typedef stan::mcmc::unit_e_nuts<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_nuts<sampler_t>(&sampler, args);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
@@ -1260,7 +1259,7 @@ namespace pystan {
         }
         case 10: {
           typedef stan::mcmc::diag_e_static_hmc<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_static_hmc<sampler_t>(&sampler, args);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
@@ -1269,7 +1268,7 @@ namespace pystan {
         }
         case 11: {
           typedef stan::mcmc::diag_e_nuts<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_nuts<sampler_t>(&sampler, args);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
@@ -1278,7 +1277,7 @@ namespace pystan {
         }
         case 20: {
           typedef stan::mcmc::dense_e_static_hmc<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_static_hmc<sampler_t>(&sampler, args);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
@@ -1287,7 +1286,7 @@ namespace pystan {
         }
         case 21: {
           typedef stan::mcmc::dense_e_nuts<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_nuts<sampler_t>(&sampler, args);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
@@ -1296,9 +1295,16 @@ namespace pystan {
         }
         case 100: {
           typedef stan::mcmc::adapt_unit_e_static_hmc<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_static_hmc<sampler_t>(&sampler, args);
-          init_adapt<sampler_t>(&sampler, args, cont_params);
+
+          double delta = args.get_ctrl_sampling_adapt_delta();
+          double gamma = args.get_ctrl_sampling_adapt_gamma();
+          double kappa = args.get_ctrl_sampling_adapt_kappa();
+          double t0 = args.get_ctrl_sampling_adapt_t0();
+          stan::services::sample::init_adapt<sampler_t>(&sampler,
+                                                        delta, gamma, kappa, t0, cont_params,
+                                                        info, error);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
                            base_rng);
@@ -1306,9 +1312,15 @@ namespace pystan {
         }
         case 101: {
           typedef stan::mcmc::adapt_unit_e_nuts<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_nuts<sampler_t>(&sampler, args);
-          init_adapt<sampler_t>(&sampler, args, cont_params);
+          double delta = args.get_ctrl_sampling_adapt_delta();
+          double gamma = args.get_ctrl_sampling_adapt_gamma();
+          double kappa = args.get_ctrl_sampling_adapt_kappa();
+          double t0 = args.get_ctrl_sampling_adapt_t0();
+          stan::services::sample::init_adapt<sampler_t>(&sampler,
+                                                        delta, gamma, kappa, t0, cont_params,
+                                                        info, error);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
                            base_rng);
@@ -1316,9 +1328,9 @@ namespace pystan {
         }
         case 110: {
           typedef stan::mcmc::adapt_diag_e_static_hmc<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_static_hmc<sampler_t>(&sampler, args);
-          init_windowed_adapt<sampler_t>(&sampler, args, cont_params);
+          init_windowed_adapt<sampler_t>(&sampler, args, cont_params, info, error);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
                            base_rng);
@@ -1326,9 +1338,9 @@ namespace pystan {
         }
         case 111: {
           typedef stan::mcmc::adapt_diag_e_nuts<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_nuts<sampler_t>(&sampler, args);
-          init_windowed_adapt<sampler_t>(&sampler, args, cont_params);
+          init_windowed_adapt<sampler_t>(&sampler, args, cont_params, info, error);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
                            base_rng);
@@ -1336,9 +1348,9 @@ namespace pystan {
         }
         case 120: {
           typedef stan::mcmc::adapt_dense_e_static_hmc<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_static_hmc<sampler_t>(&sampler, args);
-          init_windowed_adapt<sampler_t>(&sampler, args, cont_params);
+          init_windowed_adapt<sampler_t>(&sampler, args, cont_params, info, error);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
                            base_rng);
@@ -1346,9 +1358,9 @@ namespace pystan {
         }
         case 121: {
           typedef stan::mcmc::adapt_dense_e_nuts<Model, RNG_t> sampler_t;
-          sampler_t sampler(model, base_rng, &std::cout, &std::cerr);
+          sampler_t sampler(model, base_rng);
           init_nuts<sampler_t>(&sampler, args);
-          init_windowed_adapt<sampler_t>(&sampler, args, cont_params);
+          init_windowed_adapt<sampler_t>(&sampler, args, cont_params, info, error);
           execute_sampling(args, model, holder, &sampler, s, qoi_idx, initv,
                            sample_stream, diagnostic_stream, fnames_oi,
                            base_rng);
